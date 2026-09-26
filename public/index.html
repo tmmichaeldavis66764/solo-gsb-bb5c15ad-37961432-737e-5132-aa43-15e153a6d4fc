@@ -28,7 +28,7 @@
       <div class="panel">
         <div class="panel-head">
           <span>舞台（世界坐标 1000 × 600）</span>
-          <span class="hint">拖动圆点走位 · 双击空白加帧 · 右键圆点删帧 · 选中圆点可改安全半径 · 拖动禁入区矩形移位 · 右键矩形删除</span>
+          <span class="hint">拖动圆点走位 · 双击空白加帧 · 右键圆点删帧 · 选中圆点可改安全半径 · 拖动禁入区矩形移位 · 右键矩形删除 · 虚线彩框＝选中者的入场口令</span>
         </div>
         <div class="canvas-wrap">
           <canvas id="stage" width="1000" height="600"></canvas>
@@ -97,6 +97,20 @@
         <div class="duration-edit">
           总时长
           <input id="duration-input" type="number" min="1" max="120" step="1" value="12" /> s
+        </div>
+      </div>
+
+      <div class="panel panel-cues" id="panel-cues">
+        <div class="panel-head">
+          <span>入场口令 · <span id="cue-performer-name"></span></span>
+          <button id="btn-cue-add" class="btn btn-mini btn-primary" title="在当前表演者当前圆心处投放一个入口矩形">＋ 新入口</button>
+        </div>
+        <div id="cue-list" class="cue-list"></div>
+        <div id="cue-empty" class="cue-empty" hidden></div>
+        <div class="cue-hint">
+          核对圆心轨迹：从矩形外进入<strong>内部</strong>的时刻才算进入；起点已在矩形内按 0 s 进入，
+          贴边/仅到角点不计。按口令顺序匹配时窗内严格递增的进入，同一次停留只计一次；
+          已触发时刻可点击跳转播放头。编辑走位/口令即时重算，随快照保存。
         </div>
       </div>
 

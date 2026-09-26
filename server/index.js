@@ -43,7 +43,8 @@ function resolveScene(duration, performers, obstacles) {
           x: k.x,
           y: k.y,
           r: k.r === null ? base : k.r
-        }))
+        })),
+        cues: core.normalizeCues(p.cues, duration)
       };
     })
   };
@@ -53,15 +54,18 @@ function resolveScene(duration, performers, obstacles) {
  * 场景碰撞分析（与前端同一份解析引擎，便于集成/校验）。
  * body: {
  *   duration,
- *   performers:[{name?,radius,keys:[{t,x,y,r?}]}],
+ *   performers:[{name?,radius,keys:[{t,x,y,r?}],cues?:[{x,y,width,height,winStart,winEnd}]}],
  *   obstacles?:[{id?,name?,x,y,width,height}]   // 舞台禁入矩形（可空/缺省）
  * }
  * 关键帧 r 为可选安全半径（开伞/展开道具），缺省继承表演者 radius。
+ * cues 为按顺序排列的入场口令（入口矩形 + 允许进入时窗，时窗缺省为
+ * [0,duration]），引擎按圆心从矩形外严格进入的时刻核对，返回
+ * cueResults（triggered/missed/blocked）。
  * 每对返回精确碰撞区间与最小安全余量 minMargin/minMarginT
  * （distance(t)-(rA+rB) 的连续全局最小值及发生时刻），pairs 按余量升序；
  * obstacleConflicts 为每位表演者 × 每个禁入矩形的精确侵入区间，按首次
  * 进入时刻升序；场景级另附 minMargin/minMarginT/minMarginPair 与
- * firstObstacleEntry/firstObstacleConflict。旧请求（无 obstacles）完全兼容。
+ * firstObstacleEntry/firstObstacleConflict。旧请求（无 obstacles/cues）完全兼容。
  */
 app.post('/api/analyze', (req, res) => {
   try {
@@ -100,6 +104,27 @@ app.post('/api/analyze', (req, res) => {
           if (!isFinite(Number(k.r)) || Number(k.r) < 0) {
             throw new Error(`第 ${idx + 1} 人第 ${ki + 1} 个关键帧安全半径需为非负数`);
           }
+        }
+      });
+      // 入场口令入参校验（缺省/空数组直接跳过）；非法项由引擎规整时丢弃，
+      // 这里仅对显式给出但字段类型错误的请求报 400
+      if (p.cues !== undefined && p.cues !== null && !Array.isArray(p.cues)) {
+        throw new Error(`第 ${idx + 1} 人的入场口令 cues 必须为数组`);
+      }
+      (p.cues || []).forEach((c, ci) => {
+        if (!c || typeof c !== 'object') {
+          throw new Error(`第 ${idx + 1} 人第 ${ci + 1} 条入场口令格式非法`);
+        }
+        ['x', 'y', 'width', 'height', 'winStart', 'winEnd'].forEach((f) => {
+          if (c[f] !== undefined && c[f] !== null && c[f] !== '' && !isFinite(Number(c[f]))) {
+            throw new Error(`第 ${idx + 1} 人第 ${ci + 1} 条入场口令的 ${f} 必须为数字`);
+          }
+        });
+        if (isFinite(Number(c.width)) && Number(c.width) < 0) {
+          throw new Error(`第 ${idx + 1} 人第 ${ci + 1} 条入场口令的 width 不能为负`);
+        }
+        if (isFinite(Number(c.height)) && Number(c.height) < 0) {
+          throw new Error(`第 ${idx + 1} 人第 ${ci + 1} 条入场口令的 height 不能为负`);
         }
       });
     });

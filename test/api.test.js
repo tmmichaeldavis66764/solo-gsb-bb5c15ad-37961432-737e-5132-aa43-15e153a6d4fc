@@ -252,3 +252,99 @@ test('GET /api/sample：样例携带中央禁入矩形，回传分析得甲、�
     .sort();
   assert.deepEqual(who, ['p1', 'p2'], '仅横穿者甲、乙侵入中央禁入区');
 });
+
+// ---------- 入场口令 cues ----------
+
+test('POST /api/analyze：接受 cues 并返回 cueResults（触发/错过/前序未完成）', async () => {
+  const body = {
+    duration: 10,
+    performers: [
+      {
+        id: 'a', name: '甲', radius: 5,
+        keys: [{ t: 0, x: 0, y: 50 }, { t: 10, x: 100, y: 50 }],
+        cues: [
+          { x: 40, y: 40, width: 20, height: 20, winStart: 4, winEnd: 6 },
+          { x: 40, y: 40, width: 20, height: 20, winStart: 6, winEnd: 8 },
+          { x: 40, y: 40, width: 20, height: 20, winStart: 8, winEnd: 10 }
+        ]
+      },
+      { id: 'b', name: '乙', radius: 1, keys: [{ t: 0, x: 200, y: 0 }] }
+    ]
+  };
+  const r = await postAnalyze(body);
+  assert.equal(r.status, 200);
+  assert.ok(Array.isArray(r.json.cueResults));
+  assert.equal(r.json.cueResults.length, 1, '无口令者不出现在 cueResults');
+  const cr = r.json.cueResults[0];
+  assert.equal(cr.performerId, 'a');
+  assert.deepEqual(cr.results.map((x) => x.status), ['triggered', 'missed', 'blocked']);
+  // 圆心 x=40 -> t=4，窗 [4,6] 含端点，触发
+  assert.ok(Math.abs(cr.results[0].triggerT - 4) < 1e-9);
+  assert.ok(Array.isArray(cr.results[0].entries));
+  assert.ok(Math.abs(cr.results[0].entries[0] - 4) < 1e-9);
+
+  // 规整后的 scene 中口令保留（时窗、id 补全）
+  const a = r.json.scene.performers[0];
+  assert.equal(a.cues.length, 3);
+  a.cues.forEach((c) => {
+    ['id', 'x', 'y', 'width', 'height', 'winStart', 'winEnd'].forEach((f) => assert.ok(c[f] !== undefined));
+  });
+  assert.deepEqual(r.json.scene.performers[1].cues, []);
+});
+
+test('POST /api/analyze：cues 缺省时窗补 [0,duration]、非法字段返回 400', async () => {
+  const ok = await postAnalyze({
+    duration: 10,
+    performers: [
+      { id: 'a', radius: 0, keys: [{ t: 0, x: 0, y: 50 }, { t: 10, x: 100, y: 50 }],
+        cues: [{ x: 40, y: 40, width: 20, height: 20 }] },
+      { id: 'b', radius: 0, keys: [{ t: 0, x: 0, y: 0 }] }
+    ]
+  });
+  assert.equal(ok.status, 200);
+  const c = ok.json.scene.performers[0].cues[0];
+  assert.equal(c.winStart, 0);
+  assert.equal(c.winEnd, 10);
+
+  const base = {
+    duration: 10,
+    performers: [
+      { id: 'a', radius: 1, keys: [{ t: 0, x: 0, y: 0 }] },
+      { id: 'b', radius: 1, keys: [{ t: 0, x: 5, y: 5 }] }
+    ]
+  };
+  const badField = JSON.parse(JSON.stringify(base));
+  badField.performers[0].cues = [{ x: 'nope', y: 0, width: 1, height: 1 }];
+  let r = await postAnalyze(badField);
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /入场口令/);
+
+  const badType = JSON.parse(JSON.stringify(base));
+  badType.performers[0].cues = {};
+  r = await postAnalyze(badType);
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /cues 必须为数组/);
+
+  const badWidth = JSON.parse(JSON.stringify(base));
+  badWidth.performers[0].cues = [{ x: 0, y: 0, width: -2, height: 1 }];
+  r = await postAnalyze(badWidth);
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /width 不能为负/);
+});
+
+test('GET /api/sample：样例携带入场口令且分析结果为甲三态链路、乙触发', async () => {
+  const s = await getJson('/api/sample');
+  assert.equal(s.status, 200);
+  const counts = s.json.performers.map((p) => (p.cues || []).length);
+  assert.deepEqual(counts.slice(0, 2), [3, 1]);
+  const r = await postAnalyze({
+    duration: s.json.duration,
+    performers: s.json.performers,
+    obstacles: s.json.obstacles
+  });
+  assert.equal(r.status, 200);
+  const jia = r.json.cueResults.find((e) => e.performerId === 'p1');
+  assert.deepEqual(jia.results.map((x) => x.status), ['triggered', 'missed', 'blocked']);
+  const yi = r.json.cueResults.find((e) => e.performerId === 'p2');
+  assert.equal(yi.results[0].status, 'triggered');
+});
