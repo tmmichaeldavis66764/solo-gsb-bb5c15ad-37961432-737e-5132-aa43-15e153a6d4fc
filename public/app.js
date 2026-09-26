@@ -20,6 +20,9 @@
     duration: 12,
     performers: [],
     obstacles: [],
+    entryCues: [],         // 入场口令（按 performer 分组、数组顺序即口令顺序）
+    cueResults: null,      // analyzeEntryCues 全量结果（{cues, results}）
+    cueResultById: {},     // 口令 id -> 评估结果（触发/错过/前序未完成）
     selectedPid: null,
     selectedKey: null,      // {pid, index}
     selectedObstacleId: null,
@@ -74,6 +77,14 @@
       o.height = Math.round(o.height);
       return o;
     });
+    // 入场口令经引擎同一规整（时窗钳制、缺省 id/name 补全；坐标保留原值取整）
+    state.entryCues = Core.normalizeEntryCues(scene.entryCues, state.duration).map(function (c) {
+      c.x = Math.round(c.x);
+      c.y = Math.round(c.y);
+      c.width = Math.round(c.width);
+      c.height = Math.round(c.height);
+      return c;
+    });
     state.selectedPid = state.performers[0] ? state.performers[0].id : null;
     state.selectedKey = null;
     state.selectedObstacleId = null;
@@ -84,6 +95,7 @@
     document.getElementById('duration-input').value = state.duration;
     recompute();
     renderPerformers();
+    renderCuePanel();
     renderTimelineStatic();
     draw();
   }
@@ -114,11 +126,21 @@
       performers: state.performers,
       obstacles: state.obstacles
     });
+    state.cueResults = Core.analyzeEntryCues({
+      duration: state.duration,
+      performers: state.performers,
+      entryCues: state.entryCues
+    });
+    state.cueResultById = {};
+    state.cueResults.results.forEach(function (r) {
+      state.cueResultById[r.cue.id] = r;
+    });
     renderSummary();
     renderPairs();
     renderObstacleResults();
     renderTimelineDanger();
     updatePlayhead();
+    refreshCueStatuses(); // 编辑走位/时窗后立即重算口令结果（不重建行，保留输入焦点）
     refreshSnapshotDiff(); // 编辑场景后立即刷新方案对比
   }
 
@@ -225,6 +247,7 @@
       };
       canvas.setPointerCapture(e.pointerId);
       renderPerformers();
+      renderCuePanel();
       draw();
     } else if (state.selectedPid) {
       // 空白按下：准备新增走位点（pointerup 未移动则加入）
@@ -582,6 +605,291 @@
     if (state.selectedObstacleId) removeObstacle(state.selectedObstacleId);
   });
 
+  // ---------- 入场口令（entryCues）：增删 / 排序 / 逐项编辑 / 核对结果 ----------
+  var CUE_DEFAULT_SIZE = 80;   // 新增入口矩形默认边长
+  var cueListEl = document.getElementById('cue-list');
+  var cueTabsEl = document.getElementById('cue-performer-tabs');
+  var cueHeadEl = document.getElementById('cue-head');
+
+  function cueUid() {
+    return 'e' + Math.random().toString(36).slice(2, 8);
+  }
+
+  function getCueResult(id) {
+    return state.cueResultById[id] || null;
+  }
+
+  function performerCues(pid) {
+    return state.entryCues.filter(function (c) { return c.performerId === pid; });
+  }
+
+  function missedReasonText(reason) {
+    return {
+      never: '圆心全程未进入该矩形',
+      early: '进入时刻均早于时窗起点',
+      late: '进入时刻均晚于时窗终点',
+      window: '进入时刻均不在允许时窗内',
+      order: '窗内的进入都不晚于上一项触发（同一次停留只能计一次）',
+      missing: '该口令的表演者不存在'
+    }[reason] || '未触发';
+  }
+
+  function entryChipsHtml(result) {
+    if (!result.entries.length) return '';
+    return result.entries.map(function (t) {
+      var inWin = t >= result.cue.from - 1e-6 && t <= result.cue.to + 1e-6;
+      var isHit = result.status === 'triggered' && Math.abs(t - result.triggerTime) < 1e-9;
+      var cls = 'cue-entry t-jump' + (isHit ? ' cue-hit' : inWin ? ' inwin' : ' outwin');
+      return '<span class="' + cls + '" data-t="' + t + '" title="点击跳转播放头到该进入时刻 ' +
+        fmt(t) + 's（' + (inWin ? '时窗内' : '时窗外') + '）">' + fmt(t) + 's</span>';
+    }).join('');
+  }
+
+  // 构造某口令的状态区 HTML（结构刷新与轻量更新共用，保证拖动时结果同步）
+  function cueStatusHtml(result) {
+    if (result.status === 'triggered') {
+      return '<b>✓ 触发 @ <span class="t-jump cue-hit" data-t="' + result.triggerTime +
+        '" title="点击跳转播放头到触发时刻">' + fmt(result.triggerTime) + ' s</span></b>' +
+        (result.entries.length > 1 ? '<span class="cue-allentries">全部进入：' + entryChipsHtml(result) + '</span>' : '');
+    }
+    if (result.status === 'blocked') {
+      return '<span class="cue-state-text">⊘ 前序未完成</span>' +
+        (result.entries.length ? '<span class="cue-allentries">进入：' + entryChipsHtml(result) + '</span>' : '');
+    }
+    return '<span class="cue-state-text">✕ 错过时窗</span><span class="cue-reason">' +
+      escapeHtml(missedReasonText(result.reason)) + '</span>' +
+      (result.entries.length ? '<span class="cue-allentries">进入：' + entryChipsHtml(result) + '</span>' : '');
+  }
+
+  // 仅刷新行状态（class + 状态区），不重建输入行：拖动走位/改参数时保留输入焦点
+  function refreshCueStatuses() {
+    state.entryCues.forEach(function (cue) {
+      var row = cueListEl.querySelector('.cue-row[data-id="' + cue.id + '"]');
+      if (!row) return;
+      var result = getCueResult(cue.id);
+      if (!result) return;
+      row.classList.remove('triggered', 'missed', 'blocked');
+      row.classList.add(result.status);
+      var statusEl = row.querySelector('.cue-status');
+      if (statusEl) statusEl.innerHTML = cueStatusHtml(result);
+    });
+  }
+
+  function renderCuePanel() {
+    // 表演者页签
+    cueTabsEl.innerHTML = '';
+    state.performers.forEach(function (p) {
+      var tab = document.createElement('button');
+      tab.type = 'button';
+      tab.className = 'cue-tab' + (p.id === state.selectedPid ? ' active' : '');
+      tab.innerHTML = '<span class="mini-dot" style="background:' + p.color + '"></span>' + escapeHtml(p.name);
+      tab.addEventListener('click', function () {
+        state.selectedPid = p.id;
+        state.selectedKey = null;
+        renderPerformers();
+        renderTimelineStatic();
+        renderCuePanel();
+        draw();
+      });
+      cueTabsEl.appendChild(tab);
+    });
+
+    var cues = state.selectedPid ? performerCues(state.selectedPid) : [];
+    var sel = getPerformer(state.selectedPid);
+    cueHeadEl.textContent = '入场口令' + (sel ? '（' + sel.name + ' · ' + cues.length + ' 项）' : '');
+    document.getElementById('btn-cue-add').disabled = !sel;
+
+    cueListEl.innerHTML = '';
+    if (!sel) return;
+    if (!cues.length) {
+      var empty = document.createElement('div');
+      empty.className = 'cue-empty';
+      empty.textContent = '尚无入口：点右上「＋ 入口」为该表演者新增矩形入口口令。';
+      cueListEl.appendChild(empty);
+      return;
+    }
+
+    cues.forEach(function (cue, idx) {
+      var row = document.createElement('div');
+      row.className = 'cue-row';
+      row.dataset.id = cue.id;
+
+      var order = document.createElement('div');
+      order.className = 'cue-order';
+      var up = document.createElement('button');
+      up.type = 'button';
+      up.className = 'cue-move';
+      up.textContent = '▲';
+      up.title = '前移（提前本口令顺序）';
+      up.disabled = idx === 0;
+      up.addEventListener('click', function () { moveCue(cue.id, -1); });
+      var num = document.createElement('span');
+      num.className = 'cue-num';
+      num.textContent = String(idx + 1);
+      var down = document.createElement('button');
+      down.type = 'button';
+      down.className = 'cue-move';
+      down.textContent = '▼';
+      down.title = '后移（延后本口令顺序）';
+      down.disabled = idx === cues.length - 1;
+      down.addEventListener('click', function () { moveCue(cue.id, 1); });
+      order.appendChild(up);
+      order.appendChild(num);
+      order.appendChild(down);
+
+      var main = document.createElement('div');
+      main.className = 'cue-main';
+
+      var line1 = document.createElement('div');
+      line1.className = 'cue-line';
+      var nameInput = document.createElement('input');
+      nameInput.type = 'text';
+      nameInput.className = 'cue-name-input';
+      nameInput.value = cue.name;
+      nameInput.maxLength = 24;
+      nameInput.title = '口令名称';
+      nameInput.addEventListener('change', function () {
+        cue.name = nameInput.value.trim() || cue.name;
+        nameInput.value = cue.name;
+        draw();
+      });
+
+      var rectWrap = document.createElement('span');
+      rectWrap.className = 'cue-rect-edit';
+      rectWrap.appendChild(Object.assign(document.createElement('label'), { textContent: 'x' }));
+      rectWrap.appendChild(makeCueNumber(cue, 'x', 0, WORLD_W));
+      rectWrap.appendChild(Object.assign(document.createElement('label'), { textContent: 'y' }));
+      rectWrap.appendChild(makeCueNumber(cue, 'y', 0, WORLD_H));
+      rectWrap.appendChild(Object.assign(document.createElement('label'), { textContent: '宽' }));
+      rectWrap.appendChild(makeCueNumber(cue, 'width', 0, WORLD_W));
+      rectWrap.appendChild(Object.assign(document.createElement('label'), { textContent: '高' }));
+      rectWrap.appendChild(makeCueNumber(cue, 'height', 0, WORLD_H));
+
+      var del = document.createElement('button');
+      del.type = 'button';
+      del.className = 'cue-del';
+      del.textContent = '✕';
+      del.title = '删除该入场口令';
+      del.addEventListener('click', function () { removeCue(cue.id); });
+
+      line1.appendChild(nameInput);
+      line1.appendChild(rectWrap);
+      line1.appendChild(del);
+
+      var line2 = document.createElement('div');
+      line2.className = 'cue-line cue-line-time';
+      line2.appendChild(Object.assign(document.createElement('label'), { textContent: '时窗' }));
+      line2.appendChild(makeCueNumber(cue, 'from', 0, state.duration, 0.1));
+      line2.appendChild(Object.assign(document.createElement('span'), { textContent: '–' }));
+      line2.appendChild(makeCueNumber(cue, 'to', 0, state.duration, 0.1));
+      line2.appendChild(Object.assign(document.createElement('span'), { textContent: 's' }));
+      var statusEl = document.createElement('span');
+      statusEl.className = 'cue-status';
+      line2.appendChild(statusEl);
+
+      main.appendChild(line1);
+      main.appendChild(line2);
+      row.appendChild(order);
+      row.appendChild(main);
+      cueListEl.appendChild(row);
+    });
+
+    refreshCueStatuses();
+  }
+
+  function makeCueNumber(cue, field, min, max, step) {
+    var input = document.createElement('input');
+    input.type = 'number';
+    input.className = 'cue-num-input cue-field-' + field;
+    input.min = String(min);
+    input.max = String(max);
+    input.step = String(step == null ? 1 : step);
+    input.value = Math.round(cue[field] * 100) / 100;
+    input.addEventListener('change', function () { commitCueEdit(cue.id, field, input); });
+    return input;
+  }
+
+  function commitCueEdit(id, field, input) {
+    var cue = state.entryCues.find(function (c) { return c.id === id; });
+    if (!cue) return;
+    var v = Number(input.value);
+    if (!isFinite(v)) { input.value = cue[field]; return; }
+    if (field === 'from' || field === 'to') {
+      cue[field] = clamp(v, 0, state.duration);
+      if (cue.from > cue.to) { var t = cue.from; cue.from = cue.to; cue.to = t; } // 倒置自动交换
+    } else if (field === 'width' || field === 'height') {
+      cue[field] = clamp(Math.round(v), 0, field === 'width' ? WORLD_W : WORLD_H);
+    } else {
+      cue[field] = clamp(Math.round(v), 0, field === 'x' ? WORLD_W : WORLD_H);
+    }
+    recompute();
+    renderCuePanel();
+    draw();
+  }
+
+  function addCue() {
+    var p = getPerformer(state.selectedPid);
+    if (!p) return;
+    // 以该表演者在中段时刻的圆心为入口中心，投放默认尺寸矩形（收回画布内）
+    var mid = Core.positionAt(Core.normalizeKeys(p.keys), state.duration / 2);
+    var size = CUE_DEFAULT_SIZE;
+    var x = clamp(Math.round(mid.x - size / 2), 0, WORLD_W - size);
+    var y = clamp(Math.round(mid.y - size / 2), 0, WORLD_H - size);
+    var n = performerCues(p.id).length + 1;
+    var raw = {
+      id: cueUid(),
+      performerId: p.id,
+      name: '入口 ' + n,
+      x: x, y: y, width: size, height: size,
+      from: 0, to: state.duration
+    };
+    state.entryCues.push(raw);
+    recompute();
+    renderCuePanel();
+    draw();
+  }
+
+  function removeCue(id) {
+    state.entryCues = state.entryCues.filter(function (c) { return c.id !== id; });
+    recompute();
+    renderCuePanel();
+    draw();
+  }
+
+  // 在当前表演者的口令序列内前移/后移（全局数组中交换同组相邻两项）
+  function moveCue(id, dir) {
+    var pid = null;
+    var cue = state.entryCues.find(function (c) {
+      if (c.id === id) { pid = c.performerId; return true; }
+      return false;
+    });
+    if (!cue) return;
+    var groupIdx = state.entryCues
+      .map(function (c, i) { return c.performerId === pid ? i : -1; })
+      .filter(function (i) { return i >= 0; });
+    var pos = groupIdx.indexOf(state.entryCues.indexOf(cue));
+    var otherPos = pos + dir;
+    if (otherPos < 0 || otherPos >= groupIdx.length) return;
+    var a = groupIdx[pos];
+    var b = groupIdx[otherPos];
+    var tmp = state.entryCues[a];
+    state.entryCues[a] = state.entryCues[b];
+    state.entryCues[b] = tmp;
+    recompute();
+    renderCuePanel();
+    draw();
+  }
+
+  document.getElementById('btn-cue-add').addEventListener('click', addCue);
+
+  // 状态区内任意进入时刻：点击跳转播放头（事件委托）
+  cueListEl.addEventListener('click', function (e) {
+    var el = e.target && typeof e.target.closest === 'function' ? e.target.closest('.t-jump') : null;
+    if (!el || !cueListEl.contains(el)) return;
+    var t = Number(el.getAttribute('data-t'));
+    if (isFinite(t)) seek(t);
+  });
+
   // ---------- 画布绘制 ----------
   function draw() {
     ctx.clearRect(0, 0, WORLD_W, WORLD_H);
@@ -612,6 +920,9 @@
       drawObstacle(o, obsIntrude[o.id]);
     });
     drawObstacleDraft();
+
+    // 入场口令矩形（绿色虚框；选中表演者的口令全亮并编号，其余淡显）
+    drawEntryCues(t);
 
     // 关键帧圆点
     state.performers.forEach(function (p) {
@@ -870,6 +1181,93 @@
     ctx.restore();
   }
 
+  // ---------- 入场口令矩形绘制 ----------
+  function drawEntryCues(t) {
+    if (!state.entryCues.length) return;
+    // 每位表演者的口令在该人组内编号
+    var counters = {};
+    var insideNow = {};   // cueId -> 播放头时刻圆心是否在入口内
+    state.entryCues.forEach(function (cue) {
+      var n = (counters[cue.performerId] = (counters[cue.performerId] || 0) + 1);
+      var p = getPerformer(cue.performerId);
+      if (p) {
+        var st = Core.stateAt(p.keys, t, p.radius);
+        if (st.x > cue.x + 1e-6 && st.x < cue.x + cue.width - 1e-6 &&
+            st.y > cue.y + 1e-6 && st.y < cue.y + cue.height - 1e-6) {
+          insideNow[cue.id] = true;
+        }
+      }
+      drawCueRect(cue, n, !!insideNow[cue.id]);
+    });
+  }
+
+  function drawCueRect(cue, index, inside) {
+    var result = getCueResult(cue.id);
+    var status = result ? result.status : null;
+    var isSel = cue.performerId === state.selectedPid;
+    var color = status === 'triggered' ? '#3fb950'
+      : status === 'missed' ? '#f85149'
+      : status === 'blocked' ? '#8b98a5'
+      : '#58a6ff';
+
+    ctx.save();
+    // 淡填充：触发绿、错过红、未触发蓝；播放头正位于入口内时加强
+    var fill = inside ? 'rgba(63,185,80,0.22)' :
+      isSel ? 'rgba(63,185,80,0.07)' : 'rgba(63,185,80,0.035)';
+    ctx.fillStyle = fill;
+    ctx.fillRect(cue.x, cue.y, cue.width, cue.height);
+
+    ctx.setLineDash([9, 5]);
+    ctx.lineWidth = isSel ? 2 : 1;
+    ctx.strokeStyle = isSel ? color : 'rgba(120,170,130,0.4)';
+    ctx.strokeRect(cue.x + 0.5, cue.y + 0.5, Math.max(0, cue.width - 1), Math.max(0, cue.height - 1));
+    ctx.setLineDash([]);
+
+    if (!isSel) { ctx.restore(); return; }
+
+    // 编号圆 + 名称（仅选中表演者的口令标注，避免画布拥挤）
+    var bx = cue.x;
+    var by = cue.y;
+    ctx.beginPath();
+    ctx.arc(bx + 13, by + 14, 10, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.fillStyle = '#07120a';
+    ctx.font = 'bold 11px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(String(index), bx + 13, by + 14.5);
+    ctx.textAlign = 'start';
+    ctx.textBaseline = 'alphabetic';
+
+    ctx.font = 'bold 11px system-ui, sans-serif';
+    ctx.fillStyle = color;
+    ctx.fillText(cue.name, bx + 27, by + 18);
+
+    // 时窗标注（小字）
+    ctx.font = '10px system-ui, sans-serif';
+    ctx.fillStyle = 'rgba(200,220,205,0.75)';
+    ctx.fillText('时窗 ' + cue.from.toFixed(1) + '–' + cue.to.toFixed(1) + 's', bx + 27, by + 30);
+
+    // 触发时刻圆心落点：绿色 ◎ 标记
+    if (result && result.status === 'triggered') {
+      var p = getPerformer(cue.performerId);
+      if (p) {
+        var st = Core.stateAt(p.keys, result.triggerTime, p.radius);
+        ctx.beginPath();
+        ctx.arc(st.x, st.y, 6, 0, Math.PI * 2);
+        ctx.strokeStyle = '#3fb950';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(st.x, st.y, 2, 0, Math.PI * 2);
+        ctx.fillStyle = '#3fb950';
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
   function drawCollisionLinks(t) {
     if (!state.analysis) return;
     state.analysis.pairs.forEach(function (pair) {
@@ -962,6 +1360,7 @@
         state.selectedPid = p.id;
         state.selectedKey = null;
         renderPerformers();
+        renderCuePanel();
         renderTimelineStatic();
         draw();
       });
@@ -988,6 +1387,7 @@
     state.selectedPid = np.id;
     recompute();
     renderPerformers();
+    renderCuePanel();
     renderTimelineStatic();
     draw();
   }
@@ -995,6 +1395,7 @@
   function removePerformer(pid) {
     if (state.performers.length <= 2) return;
     state.performers = state.performers.filter(function (p) { return p.id !== pid; });
+    state.entryCues = state.entryCues.filter(function (c) { return c.performerId !== pid; });
     if (state.selectedPid === pid) {
       state.selectedPid = state.performers[0].id;
       state.selectedKey = null;
@@ -1002,6 +1403,7 @@
     state.activePairKey = null;
     recompute();
     renderPerformers();
+    renderCuePanel();
     renderTimelineStatic();
     draw();
   }
@@ -1259,6 +1661,7 @@
           state.selectedPid = p.id;
           state.selectedKey = { pid: p.id, index: i };
           renderPerformers();
+          renderCuePanel();
           draw();
           state.drag = {
             type: 'tick',
@@ -1321,6 +1724,25 @@
         lane.appendChild(bar);
       });
     });
+
+    // 入场口令：触发时刻在当事人泳道标绿色菱形（点击跳到触发时刻）
+    if (state.cueResults) {
+      state.cueResults.results.forEach(function (r) {
+        if (r.status !== 'triggered') return;
+        var lane = lanesEl.querySelector('.tl-lane[data-pid="' + r.cue.performerId + '"]');
+        if (!lane) return;
+        var mark = document.createElement('div');
+        mark.className = 'tl-cue t-jump';
+        mark.style.left = tToX(r.triggerTime, lw) + 'px';
+        mark.title = '入场口令「' + r.cue.name + '」触发 @ ' +
+          r.triggerTime.toFixed(2) + 's（点击跳转）';
+        mark.addEventListener('click', function (e) {
+          e.stopPropagation();
+          seek(r.triggerTime);
+        });
+        lane.appendChild(mark);
+      });
+    }
   }
 
   // 时间轴：拖动时刻柄 / 点击定位播放头
@@ -1470,9 +1892,12 @@
       if (!p.keys.length) p.keys = [{ t: 0, x: 100, y: 100, r: null }];
       // 保证每人末帧覆盖新时长（静态延长）
     });
+    // 入场口令时窗钳到新时长（倒置自动交换由规整保证）
+    state.entryCues = Core.normalizeEntryCues(state.entryCues, d);
     state.time = Math.min(state.time, d);
     document.getElementById('duration-readout').textContent = d.toFixed(1);
     recompute();
+    renderCuePanel();
     renderTimelineStatic();
     draw();
   });
@@ -1516,12 +1941,13 @@
   var snapStatusEl = document.getElementById('snap-status');
   var snapStatusTimer = null;
 
-  // 深拷贝当前场景（状态中的 performer/obstacle 均为纯数据）
+  // 深拷贝当前场景（状态中的 performer/obstacle/entryCue 均为纯数据）
   function serializeScene() {
     return JSON.parse(JSON.stringify({
       duration: state.duration,
       performers: state.performers,
-      obstacles: state.obstacles
+      obstacles: state.obstacles,
+      entryCues: state.entryCues
     }));
   }
 

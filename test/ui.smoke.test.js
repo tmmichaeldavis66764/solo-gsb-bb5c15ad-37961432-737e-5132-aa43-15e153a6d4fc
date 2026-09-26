@@ -624,8 +624,7 @@ test('方案快照：编辑场景立即刷新对比，点击结果时刻跳转�
   dom.window.close();
 });
 
-test('方案快照：两个槽位都选快照时按快照内容对比，相同选择给出提示', async () => {
-  const dom = await boot();
+test('方案快照：两个槽位都选快照时按快照内容对比，相同选择给出提示', async () => {  const dom = await boot();
   const { window } = dom;
   const doc = window.document;
   const nameInput = doc.getElementById('snap-name');
@@ -653,5 +652,219 @@ test('方案快照：两个槽位都选快照时按快照内容对比，相同�
   selB.value = id2;
   selB.dispatchEvent(new window.Event('change', { bubbles: true }));
   assert.match(doc.getElementById('snap-diff').textContent, /全局最大偏移\s*0\.00/);
+  dom.window.close();
+});
+
+// ---------- 入场口令 ----------
+
+test('入场口令：启动即渲染 5 项样例口令，状态为触发/触发/错过/前序未完成/触发', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+
+  // 表演者页签 4 个，甲为初始选中
+  const tabs = [...doc.querySelectorAll('.cue-tab')];
+  assert.equal(tabs.length, 4);
+  assert.ok(tabs[0].classList.contains('active'));
+
+  // 甲有 4 项口令，行 class 反映状态
+  const rows = [...doc.querySelectorAll('#cue-list .cue-row')];
+  assert.equal(rows.length, 4);
+  assert.ok(rows[0].classList.contains('triggered'));
+  assert.ok(rows[1].classList.contains('triggered'));
+  assert.ok(rows[2].classList.contains('missed'));
+  assert.ok(rows[3].classList.contains('blocked'));
+
+  // 触发行展示触发时刻且可点击；错过行给出原因；blocked 行显示前序未完成
+  assert.match(rows[0].textContent, /触发/);
+  assert.ok(rows[0].querySelector('.cue-hit'));
+  assert.match(rows[2].textContent, /错过时窗/);
+  assert.match(rows[2].textContent, /早于时窗/);
+  assert.match(rows[3].textContent, /前序未完成/);
+
+  // 编号 1..4
+  assert.deepEqual(rows.map((r) => r.querySelector('.cue-num').textContent), ['1', '2', '3', '4']);
+
+  // 时间轴触发标记（甲 2 个 + 乙 1 个）
+  assert.equal(doc.querySelectorAll('.tl-cue').length, 3);
+  dom.window.close();
+});
+
+test('入场口令：点击已触发时刻跳转播放头（状态区与时间轴菱形均可）', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+
+  const firstRow = doc.querySelector('#cue-list .cue-row.triggered');
+  const hit = firstRow.querySelector('.cue-hit');
+  const expected = Number(hit.getAttribute('data-t'));
+  hit.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  let tv = Number(doc.getElementById('time-input').value);
+  assert.ok(Math.abs(tv - expected) < 0.01, `播放头应跳到 ${expected}，实际 ${tv}`);
+
+  // 时间轴绿色菱形同样可跳转
+  const mark = doc.querySelector('.tl-cue');
+  const mt = parseFloat(mark.style.left); // 仅验证存在且有水平位置
+  assert.ok(mt >= 0);
+  mark.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  tv = Number(doc.getElementById('time-input').value);
+  const markT = Number(mark.title.match(/@ ([\d.]+)s/)[1]);
+  assert.ok(Math.abs(tv - markT) < 0.01, `菱形点击应跳到 ${markT}，实际 ${tv}`);
+  dom.window.close();
+});
+
+test('入场口令：错过行的窗外进入时刻仍可点击跳转', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+
+  const missedRow = doc.querySelector('#cue-list .cue-row.missed');
+  const entries = [...missedRow.querySelectorAll('.cue-entry')];
+  assert.ok(entries.length >= 1, '错过行列出实际进入时刻');
+  assert.ok(entries.every((e) => e.classList.contains('outwin')), '窗外进入置灰');
+  const t = Number(entries[0].getAttribute('data-t'));
+  entries[0].dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  assert.ok(Math.abs(Number(doc.getElementById('time-input').value) - t) < 0.01);
+  dom.window.close();
+});
+
+test('入场口令：▲▼ 排序后立即按新顺序重算（错过项后移可恢复触发）', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+
+  let rows = [...doc.querySelectorAll('#cue-list .cue-row')];
+  // 初始：e1 触发、e2 触发、e3 错过（early）、e4 blocked
+  // 把第 3 项（错窗口 e3）下移到末尾：顺序变为 e1,e2,e4,e3
+  rows[2].querySelectorAll('.cue-move')[1].click();
+  await new Promise((r) => setTimeout(r, 10));
+
+  rows = [...doc.querySelectorAll('#cue-list .cue-row')];
+  assert.equal(rows.length, 4);
+  assert.ok(rows[0].classList.contains('triggered'), '第1项仍触发');
+  assert.ok(rows[1].classList.contains('triggered'), '第2项仍触发');
+  // e4 进入 t≈8.18 晚于 e2 的 2.45，时窗 [0,12] -> 现可触发
+  assert.ok(rows[2].classList.contains('triggered'), 'e3 后移后，e4 在第3位应触发');
+  // e3 进入 t≈4.16 早于 8.18 且其窗 [5,7] 不含 -> 仍错过
+  assert.ok(rows[3].classList.contains('missed'), '错窗口移到末尾仍错过');
+  dom.window.close();
+});
+
+test('入场口令：新增与删除口令', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+
+  const addBtn = doc.getElementById('btn-cue-add');
+  assert.equal(addBtn.disabled, false);
+  // 甲初始 4 项 -> 新增后 5 项
+  addBtn.click();
+  await new Promise((r) => setTimeout(r, 10));
+  let rows = [...doc.querySelectorAll('#cue-list .cue-row')];
+  assert.equal(rows.length, 5);
+  // 新口令默认时窗 [0,12]、入口位于甲中段位置附近；甲一次横穿只停留一次，
+  // 已有两项先触发，故新项（在末尾）的状态为 missed（order）
+  assert.ok(rows[4].classList.contains('missed') || rows[4].classList.contains('blocked'));
+
+  // 删除第一项后回到 4 项
+  rows[0].querySelector('.cue-del').click();
+  await new Promise((r) => setTimeout(r, 10));
+  rows = [...doc.querySelectorAll('#cue-list .cue-row')];
+  assert.equal(rows.length, 4);
+  dom.window.close();
+});
+
+test('入场口令：编辑时窗立即重算（把错过项时窗放宽到包含进入时刻）', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+
+  // e3 错过（early）：进入 t≈4.16，时窗 [5,7]；把 from 改成 0
+  let rows = [...doc.querySelectorAll('#cue-list .cue-row')];
+  const missedRow = rows[2];
+  const fromInput = missedRow.querySelector('.cue-field-from');
+  fromInput.value = '0';
+  fromInput.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 10));
+
+  rows = [...doc.querySelectorAll('#cue-list .cue-row')];
+  // e3 进入 4.16 严格晚于 e2 的 2.45 -> 触发；其后 e4 进入 8.18 -> 也触发
+  assert.ok(rows[2].classList.contains('triggered'), '放宽时窗后 e3 触发');
+  assert.ok(rows[3].classList.contains('triggered'), 'e4 随之触发');
+  dom.window.close();
+});
+
+test('入场口令：切换表演者页签显示各自口令', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+
+  // 甲 4 项
+  assert.equal(doc.querySelectorAll('#cue-list .cue-row').length, 4);
+  // 切到乙：1 项（顶场口，触发 0s）
+  const tabs = [...doc.querySelectorAll('.cue-tab')];
+  tabs[1].click();
+  await new Promise((r) => setTimeout(r, 5));
+  const rows = [...doc.querySelectorAll('#cue-list .cue-row')];
+  assert.equal(rows.length, 1);
+  assert.ok(rows[0].classList.contains('triggered'));
+  assert.match(doc.getElementById('cue-head').textContent, /乙/);
+  // 切到丙：空态
+  tabs[2].click();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.ok(doc.querySelector('#cue-list .cue-empty'));
+  assert.equal(doc.querySelectorAll('#cue-list .cue-row').length, 0);
+  dom.window.close();
+});
+
+test('入场口令：随快照保存并在载入时恢复', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+
+  doc.getElementById('snap-name').value = '带口令';
+  doc.getElementById('btn-snap-save').click();
+  await new Promise((r) => setTimeout(r, 10));
+  const stored = JSON.parse(window.localStorage.getItem('trajectory-collision-stage.snapshots.v1'));
+  assert.equal(stored.list[0].scene.entryCues.length, 5, '口令随场景写入快照');
+
+  // 删除一项后舞台只剩 4 项（全局）
+  const rowsBefore = [...doc.querySelectorAll('#cue-list .cue-row')];
+  rowsBefore[0].querySelector('.cue-del').click();
+  await new Promise((r) => setTimeout(r, 10));
+
+  // 载入快照恢复 5 项，且状态重新算出
+  doc.querySelector('.snap-item .snap-load').click();
+  await new Promise((r) => setTimeout(r, 10));
+  // 当前选中者是甲（载入后选中第一个表演者）
+  assert.equal(doc.querySelectorAll('#cue-list .cue-row').length, 4, '甲的 4 项口令恢复');
+  const reStored = JSON.parse(window.localStorage.getItem('trajectory-collision-stage.snapshots.v1'));
+  assert.equal(reStored.list[0].scene.entryCues.length, 5, '已保存快照不受编辑影响');
+  dom.window.close();
+});
+
+test('入场口令：编辑走位后立即重算（拖动关键帧改变进入时刻）', async () => {
+  const dom = await boot();
+  const { window } = dom;
+  const doc = window.document;
+  const canvas = doc.getElementById('stage');
+
+  function pointer(type, x, y) {
+    canvas.dispatchEvent(new window.MouseEvent(type, {
+      bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0
+    }));
+  }
+
+  // e1 时窗 [0,2]，触发于 t≈0.505（甲首帧 x=60）。把甲首帧向左移到 x=0，
+  // 入口 x=97 的进入变为 t≈1.01，仍在窗内 -> 仍触发；再右移到 x=120，
+  // 首帧已越过入口、且不再有进入 -> 变成 never 错过。
+  pointer('pointerdown', 60, 300);
+  pointer('pointermove', 120, 300);
+  pointer('pointerup', 120, 300);
+  await new Promise((r) => setTimeout(r, 10));
+
+  const rows = [...doc.querySelectorAll('#cue-list .cue-row')];
+  // 甲现在首帧 x=120，之后只向右走：e1(97..147,y260..340) 起点在内部 -> t=0 触发
+  assert.ok(rows[0].classList.contains('triggered'));
   dom.window.close();
 });

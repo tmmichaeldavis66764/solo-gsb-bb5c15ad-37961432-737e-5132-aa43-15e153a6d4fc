@@ -26,10 +26,11 @@ app.get('/api/sample', (_req, res) => {
  * （缺省继承的帧解析为表演者当前 radius），禁入矩形经坐标/尺寸规整，
  * 便于集成方直接消费。
  */
-function resolveScene(duration, performers, obstacles) {
+function resolveScene(duration, performers, obstacles, entryCues) {
   return {
     duration: duration,
     obstacles: core.normalizeObstacles(obstacles),
+    entryCues: core.normalizeEntryCues(entryCues, duration),
     performers: performers.map((p) => {
       const base = Math.max(0, Number(p.radius) || 0);
       const ks = core.normalizeKeys(p.keys, base);
@@ -55,13 +56,16 @@ function resolveScene(duration, performers, obstacles) {
  *   duration,
  *   performers:[{name?,radius,keys:[{t,x,y,r?}]}],
  *   obstacles?:[{id?,name?,x,y,width,height}]   // 舞台禁入矩形（可空/缺省）
+ *   entryCues?:[{id?,name?,performerId,x,y,width,height,from?,to?}]
  * }
  * 关键帧 r 为可选安全半径（开伞/展开道具），缺省继承表演者 radius。
  * 每对返回精确碰撞区间与最小安全余量 minMargin/minMarginT
  * （distance(t)-(rA+rB) 的连续全局最小值及发生时刻），pairs 按余量升序；
  * obstacleConflicts 为每位表演者 × 每个禁入矩形的精确侵入区间，按首次
- * 进入时刻升序；场景级另附 minMargin/minMarginT/minMarginPair 与
- * firstObstacleEntry/firstObstacleConflict。旧请求（无 obstacles）完全兼容。
+ * 进入时刻升序；entryCueResults 为按口令顺序核对的入场口令结果
+ * （触发/错过时窗/前序未完成）；场景级另附 minMargin/minMarginT/minMarginPair 与
+ * firstObstacleEntry/firstObstacleConflict。旧请求（无 obstacles/entryCues）
+ * 完全兼容。
  */
 app.post('/api/analyze', (req, res) => {
   try {
@@ -69,6 +73,7 @@ app.post('/api/analyze', (req, res) => {
     const duration = Number(scene.duration);
     const performers = Array.isArray(scene.performers) ? scene.performers : [];
     const rawObstacles = scene.obstacles;
+    const rawEntryCues = scene.entryCues;
 
     if (!(duration > 0) || !isFinite(duration)) {
       return res.status(400).json({ error: 'duration 必须为正数（秒）' });
@@ -78,6 +83,9 @@ app.post('/api/analyze', (req, res) => {
     }
     if (rawObstacles !== undefined && rawObstacles !== null && !Array.isArray(rawObstacles)) {
       return res.status(400).json({ error: 'obstacles 必须为数组' });
+    }
+    if (rawEntryCues !== undefined && rawEntryCues !== null && !Array.isArray(rawEntryCues)) {
+      return res.status(400).json({ error: 'entryCues 必须为数组' });
     }
 
     performers.forEach((p, idx) => {
@@ -119,11 +127,50 @@ app.post('/api/analyze', (req, res) => {
       }
     });
 
+    // 入场口令入参校验（缺省/空数组直接跳过，保持旧请求兼容）
+    const performerIds = new Set(performers.map((p) => String(p.id)));
+    (rawEntryCues || []).forEach((cu, idx) => {
+      if (!cu || typeof cu !== 'object') {
+        throw new Error(`第 ${idx + 1} 个入场口令格式非法`);
+      }
+      if (cu.performerId === undefined || cu.performerId === null || cu.performerId === '') {
+        throw new Error(`第 ${idx + 1} 个入场口令缺少 performerId`);
+      }
+      if (!performerIds.has(String(cu.performerId))) {
+        throw new Error(`第 ${idx + 1} 个入场口令的 performerId 不存在`);
+      }
+      ['x', 'y', 'width', 'height'].forEach((f) => {
+        if (!isFinite(Number(cu[f]))) {
+          throw new Error(`第 ${idx + 1} 个入场口令的 ${f} 必须为有限数`);
+        }
+      });
+      if (Number(cu.width) < 0 || Number(cu.height) < 0) {
+        throw new Error(`第 ${idx + 1} 个入场口令的 width/height 不能为负`);
+      }
+      ['from', 'to'].forEach((f) => {
+        if (cu[f] !== undefined && cu[f] !== null && cu[f] !== '' &&
+            (!isFinite(Number(cu[f])) || Number(cu[f]) < 0 || Number(cu[f]) > duration)) {
+          throw new Error(`第 ${idx + 1} 个入场口令的 ${f} 需在 [0, ${duration}] 内`);
+        }
+      });
+    });
+
     const obstacles = core.normalizeObstacles(rawObstacles);
+    const entryCues = core.normalizeEntryCues(rawEntryCues || [], duration);
     const result = core.analyzeScene({ duration, performers, obstacles });
+    // 口令已在上方规整（补全 id/name/时窗），直接对规整结果分组核对
+    const entryCueAnalysis = core.analyzeEntryCues({
+      duration,
+      performers,
+      entryCues: entryCues
+    });
     res.json(Object.assign(
-      { scene: resolveScene(duration, performers, obstacles) },
-      result
+      { scene: resolveScene(duration, performers, obstacles, entryCues) },
+      result,
+      {
+        entryCues: entryCues,
+        entryCueResults: entryCueAnalysis.results
+      }
     ));
   } catch (err) {
     res.status(400).json({ error: err.message });

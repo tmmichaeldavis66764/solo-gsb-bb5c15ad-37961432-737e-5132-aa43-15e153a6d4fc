@@ -252,3 +252,130 @@ test('GET /api/sample：样例携带中央禁入矩形，回传分析得甲、�
     .sort();
   assert.deepEqual(who, ['p1', 'p2'], '仅横穿者甲、乙侵入中央禁入区');
 });
+
+// ---------- 入场口令 entryCues ----------
+
+test('POST /api/analyze：接受 entryCues 并返回规整口令与触发结果', async () => {
+  const body = {
+    duration: 10,
+    performers: [
+      { id: 'a', name: '甲', radius: 50, keys: [{ t: 0, x: 0, y: 50 }, { t: 10, x: 100, y: 50 }] },
+      { id: 'b', name: '乙', radius: 0, keys: [{ t: 0, x: 0, y: 300 }, { t: 10, x: 100, y: 300 }] }
+    ],
+    entryCues: [
+      { name: '入口甲', performerId: 'a', x: 40, y: 40, width: 20, height: 20, from: 0, to: 5 },
+      { performerId: 'b', x: 40, y: 40, width: 20, height: 20 } // 缺省名/时窗，乙永不进入
+    ]
+  };
+  const r = await postAnalyze(body);
+  assert.equal(r.status, 200);
+  assert.equal(r.json.entryCues.length, 2);
+  assert.equal(r.json.entryCues[0].name, '入口甲');
+  assert.equal(r.json.entryCues[1].name, '入口 2');
+  assert.deepEqual([r.json.entryCues[1].from, r.json.entryCues[1].to], [0, 10], '缺省时窗为 [0,duration]');
+  assert.equal(r.json.entryCueResults.length, 2);
+
+  const hit = r.json.entryCueResults[0];
+  assert.equal(hit.status, 'triggered');
+  assert.ok(Math.abs(hit.triggerTime - 4) < 1e-9, '甲圆心 t=4 进入（与半径 50 无关）');
+  assert.deepEqual(hit.entries, [4]);
+
+  const miss = r.json.entryCueResults[1];
+  assert.equal(miss.status, 'missed');
+  assert.equal(miss.reason, 'never');
+  assert.equal(miss.triggerTime, null);
+
+  // scene 回显同形规整口令
+  assert.deepEqual(r.json.scene.entryCues, r.json.entryCues);
+});
+
+test('POST /api/analyze：entryCues 错过时窗/前序未完成状态与严格递增触发', async () => {
+  const body = {
+    duration: 10,
+    performers: [
+      { id: 'a', name: '甲', radius: 0, keys: [{ t: 0, x: 0, y: 50 }, { t: 10, x: 100, y: 50 }] },
+      { id: 'b', name: '乙', radius: 0, keys: [{ t: 0, x: 0, y: 50 }, { t: 10, x: 100, y: 50 }] }
+    ],
+    entryCues: [
+      { id: 'c1', performerId: 'a', x: 40, y: 40, width: 20, height: 20, from: 5, to: 7 }, // 进入 t=4 -> early
+      { id: 'c2', performerId: 'a', x: 80, y: 40, width: 20, height: 20, from: 0, to: 10 }  // 前序未完成
+    ]
+  };
+  const r = await postAnalyze(body);
+  assert.equal(r.status, 200);
+  assert.equal(r.json.entryCueResults[0].status, 'missed');
+  assert.equal(r.json.entryCueResults[0].reason, 'early');
+  assert.equal(r.json.entryCueResults[1].status, 'blocked');
+  assert.equal(r.json.entryCueResults[1].reason, 'prev');
+  // blocked 项仍返回实际进入时刻（t=8）供跳转
+  assert.deepEqual(r.json.entryCueResults[1].entries, [8]);
+});
+
+test('GET /api/sample：样例含 entryCues，分析得 3 触发 1 错过 1 前序未完成', async () => {
+  const s = await getJson('/api/sample');
+  assert.equal(s.status, 200);
+  assert.equal(s.json.entryCues.length, 5);
+  const r = await postAnalyze({
+    duration: s.json.duration,
+    performers: s.json.performers,
+    obstacles: s.json.obstacles,
+    entryCues: s.json.entryCues
+  });
+  assert.equal(r.status, 200);
+  const status = r.json.entryCueResults.map((e) => e.status);
+  assert.deepEqual(status, ['triggered', 'triggered', 'missed', 'blocked', 'triggered']);
+  const e5 = r.json.entryCueResults.find((e) => e.cue.id === 'e5');
+  assert.ok(Math.abs(e5.triggerTime - 0) < 1e-9, '乙起点已在入口内按 0s 触发');
+});
+
+test('POST /api/analyze：非法 entryCues 返回 400', async () => {
+  const base = {
+    duration: 10,
+    performers: [
+      { id: 'a', name: '甲', radius: 0, keys: [{ t: 0, x: 0, y: 50 }] },
+      { id: 'b', name: '乙', radius: 0, keys: [{ t: 0, x: 0, y: 60 }] }
+    ]
+  };
+
+  let r = await postAnalyze(Object.assign({ entryCues: {} }, base));
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /entryCues/);
+
+  r = await postAnalyze(Object.assign({
+    entryCues: [{ x: 0, y: 0, width: 10, height: 10 }]
+  }, base));
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /performerId/);
+
+  r = await postAnalyze(Object.assign({
+    entryCues: [{ performerId: 'zzz', x: 0, y: 0, width: 10, height: 10 }]
+  }, base));
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /不存在/);
+
+  r = await postAnalyze(Object.assign({
+    entryCues: [{ performerId: 'a', x: 0, y: 0, width: -1, height: 10 }]
+  }, base));
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /入场口令/);
+
+  r = await postAnalyze(Object.assign({
+    entryCues: [{ performerId: 'a', x: 0, y: 0, width: 10, height: 10, from: 99 }]
+  }, base));
+  assert.equal(r.status, 400);
+  assert.match(r.json.error, /from/);
+});
+
+test('POST /api/analyze：无 entryCues 的旧请求继续兼容（空数组字段）', async () => {
+  const r = await postAnalyze({
+    duration: 10,
+    performers: [
+      { id: 'a', name: '甲', radius: 10, keys: [{ t: 0, x: 0, y: 0 }, { t: 10, x: 100, y: 0 }] },
+      { id: 'b', name: '乙', radius: 10, keys: [{ t: 0, x: 100, y: 0 }, { t: 10, x: 0, y: 0 }] }
+    ]
+  });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.json.entryCues, []);
+  assert.deepEqual(r.json.entryCueResults, []);
+  assert.deepEqual(r.json.scene.entryCues, []);
+});

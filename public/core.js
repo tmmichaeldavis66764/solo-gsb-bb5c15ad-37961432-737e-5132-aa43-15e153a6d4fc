@@ -704,6 +704,226 @@
     return false;
   }
 
+  // ---------- 入场口令（entryCues） ----------
+  //
+  // 场景可为每位表演者携带有序的"入场口令"：
+  //   { id, performerId, name, x, y, width, height, from, to }
+  // 其中矩形 [x,x+width]×[y,y+height] 是入口区域、[from,to] 是允许进入的
+  // 时间窗。核对只看**圆心轨迹**（与身体/安全半径无关）：
+  //  - 圆心从矩形外（含边界）进入矩形**严格内部**的时刻才算"进入时刻"；
+  //  - 起点已在内部记 t=0；仅贴边运动、角点相切（轨迹未进入开矩形）不计；
+  //  - 对分段直线轨迹求出全部进入时刻（每次"停留"一个，跨关键帧相接合并）；
+  //  - 按口令顺序贪心选取：时窗内（端点含容差）且**严格晚于**上一项触发
+  //    时刻的最早进入时刻触发；错过时窗的项记 missed，其后各项记 blocked
+  //    （前序未完成）。零宽/零高退化矩形永远无法进入。
+
+  var CUE_ID_PREFIX = 'e';
+  var CUE_TIME_EPS = 1e-6;     // 时窗包含 / 触发时刻严格递增判定容差（秒）
+  var RECT_INSIDE_EPS = 1e-7;  // 世界坐标"严格位于矩形内部"判定容差（吸收切分算术误差）
+
+  function nextEntryCueId(existing) {
+    var used = {};
+    (existing || []).forEach(function (c) { used[c.id] = true; });
+    var id;
+    do {
+      id = CUE_ID_PREFIX + Math.random().toString(36).slice(2, 8);
+    } while (used[id]);
+    return id;
+  }
+
+  /**
+   * 规整入场口令列表（顺序保持不变）：
+   *  - performerId 必需（缺失项丢弃）；x/y/width/height 为有限数，尺寸非负；
+   *  - from/to 缺省 0/duration，钳到 [0,duration]，倒置自动交换；
+   *  - 缺省 id 自动生成，缺省 name 用"入口 N"。
+   */
+  function normalizeEntryCues(cues, duration) {
+    var T = Number(duration);
+    if (!(T > 0)) throw new Error('duration 必须为正数');
+    var list = Array.isArray(cues) ? cues : [];
+    var out = [];
+    list.forEach(function (raw) {
+      if (!raw || typeof raw !== 'object') return;
+      var x = Number(raw.x);
+      var y = Number(raw.y);
+      var w = Number(raw.width);
+      var h = Number(raw.height);
+      if (![x, y, w, h].every(isFinite) || w < 0 || h < 0) return;
+      var performerId = raw.performerId === null || raw.performerId === undefined
+        ? null : String(raw.performerId);
+      if (!performerId) return;
+
+      var from = (raw.from === undefined || raw.from === null || raw.from === '')
+        ? 0 : Number(raw.from);
+      var to = (raw.to === undefined || raw.to === null || raw.to === '')
+        ? T : Number(raw.to);
+      if (!isFinite(from) || !isFinite(to)) { from = 0; to = T; }
+      from = clamp(from, 0, T);
+      to = clamp(to, 0, T);
+      if (from > to) { var tmp = from; from = to; to = tmp; }
+
+      var index = out.length + 1;
+      var name = (raw.name === null || raw.name === undefined || String(raw.name).trim() === '')
+        ? '入口 ' + index
+        : String(raw.name);
+      out.push({
+        id: (raw.id === null || raw.id === undefined || raw.id === '')
+          ? nextEntryCueId(out) : String(raw.id),
+        performerId: performerId,
+        name: name,
+        x: x,
+        y: y,
+        width: Math.max(0, w),
+        height: Math.max(0, h),
+        from: from,
+        to: to
+      });
+    });
+    return out;
+  }
+
+  /**
+   * 求圆心轨迹对单个轴对齐矩形的全部进入时刻（升序）。
+   * 逐活动段以四条边界线 X0/X1/Y0/Y1 与该段直线的交点切分时间窗；
+   * 每个子段内圆心相对矩形的位置恒定，取子段中点判定是否严格位于
+   * 开矩形 (X0,X1)×(Y0,Y1) 内；覆盖严格内部的子段经 mergeIntervals
+   * 跨段合并——同一次连续停留只产生一个进入时刻，其左端点即进入时刻
+   * （起点在内部时为 0；恰好走到边界、沿边运动、角点相切都不产生区间）。
+   */
+  function rectCenterEntryTimes(keys, duration, rect) {
+    // 只取位置关键帧（圆心与安全半径无关）
+    var posKeys = (keys || []).map(function (k) { return { t: k.t, x: k.x, y: k.y }; });
+    var segs = buildSegments(posKeys, duration, 0);
+
+    var X0 = rect.x;
+    var Y0 = rect.y;
+    var X1 = rect.x + rect.width;
+    var Y1 = rect.y + rect.height;
+    if (X1 - X0 <= RECT_INSIDE_EPS || Y1 - Y0 <= RECT_INSIDE_EPS) return []; // 退化矩形不可进入
+
+    var raw = [];
+    segs.forEach(function (s) {
+      var cuts = [s.t0, s.t1];
+      var axes = [
+        { u: s.x0, v: s.vx, b0: X0, b1: X1 },
+        { u: s.y0, v: s.vy, b0: Y0, b1: Y1 }
+      ];
+      axes.forEach(function (ax) {
+        if (Math.abs(ax.v) < EPS) return;
+        [ax.b0, ax.b1].forEach(function (b) {
+          var tc = (b - ax.u) / ax.v;
+          if (tc > s.t0 + EPS && tc < s.t1 - EPS) cuts.push(tc);
+        });
+      });
+      cuts.sort(function (a, b) { return a - b; });
+      var uniq = [];
+      cuts.forEach(function (tc) {
+        if (!uniq.length || Math.abs(tc - uniq[uniq.length - 1]) > EPS) uniq.push(tc);
+      });
+
+      for (var i = 0; i < uniq.length - 1; i++) {
+        var lo = uniq[i];
+        var hi = uniq[i + 1];
+        if (hi - lo < EPS) continue;
+        var mid = (lo + hi) / 2;
+        var xm = s.x0 + s.vx * mid;
+        var ym = s.y0 + s.vy * mid;
+        // 严格内部：在边界线上（贴边/角点）的子段不计
+        var inside = xm > X0 + RECT_INSIDE_EPS && xm < X1 - RECT_INSIDE_EPS &&
+          ym > Y0 + RECT_INSIDE_EPS && ym < Y1 - RECT_INSIDE_EPS;
+        if (inside) raw.push([lo, hi]);
+      }
+    });
+
+    return mergeIntervals(raw).map(function (iv) { return iv[0]; });
+  }
+
+  /**
+   * 按口令顺序评估一位表演者的入场口令（贪心、严格递增触发）。
+   * cues 须已按该表演者的口令顺序排列；返回与 cues 等长对齐的数组：
+   *   { cue, status:'triggered'|'missed'|'blocked', reason, triggerTime, entries }
+   *  - triggered：取时窗 [from,to] 内严格晚于前一项触发时刻的最早进入时刻；
+   *  - missed：没有可用进入（reason: never 全程未进入 / early 都早于时窗 /
+   *    late 都晚于时窗 / window 均不在时窗 / order 窗内无更晚进入），
+   *    其后各项一律 blocked（reason:'prev'，前序未完成）；
+   *  - entries 始终为该矩形的全部进入时刻（供前端展示/跳转，含窗外项）。
+   */
+  function evaluateEntryCues(performer, cues, duration) {
+    var list = cues || [];
+    if (!performer) {
+      return list.map(function (cue) {
+        return { cue: cue, status: 'missed', reason: 'missing', triggerTime: null, entries: [] };
+      });
+    }
+    var entriesList = list.map(function (cue) {
+      return rectCenterEntryTimes(performer.keys, duration, cue);
+    });
+
+    var prevTrigger = -Infinity;
+    var blocked = false;
+    return list.map(function (cue, i) {
+      var entries = entriesList[i];
+      if (blocked) {
+        return { cue: cue, status: 'blocked', reason: 'prev', triggerTime: null, entries: entries };
+      }
+      var inWindow = entries.filter(function (t) {
+        return t >= cue.from - CUE_TIME_EPS && t <= cue.to + CUE_TIME_EPS;
+      });
+      var later = inWindow.filter(function (t) {
+        return t > prevTrigger + CUE_TIME_EPS;
+      });
+      if (later.length) {
+        var tt = later[0];
+        prevTrigger = tt;
+        return { cue: cue, status: 'triggered', reason: null, triggerTime: tt, entries: entries };
+      }
+      blocked = true;
+      var reason;
+      if (!entries.length) {
+        reason = 'never';
+      } else if (!inWindow.length) {
+        if (entries[entries.length - 1] < cue.from - CUE_TIME_EPS) reason = 'early';
+        else if (entries[0] > cue.to + CUE_TIME_EPS) reason = 'late';
+        else reason = 'window';
+      } else {
+        reason = 'order';
+      }
+      return { cue: cue, status: 'missed', reason: reason, triggerTime: null, entries: entries };
+    });
+  }
+
+  /**
+   * 分析整个场景的入场口令：按表演者分组、各自按数组顺序（即口令顺序）
+   * 评估。返回 { cues: 规整后的口令（顺序不变）, results: 与 cues 对齐 }。
+   */
+  function analyzeEntryCues(scene) {
+    var duration = Number(scene.duration);
+    if (!(duration > 0)) throw new Error('duration 必须为正数');
+    var ps = scene.performers || [];
+    var cues = normalizeEntryCues(scene.entryCues, duration);
+
+    var groups = {};
+    cues.forEach(function (cue) {
+      (groups[cue.performerId] = groups[cue.performerId] || []).push(cue);
+    });
+    var resultById = {};
+    Object.keys(groups).forEach(function (pid) {
+      var p = null;
+      for (var i = 0; i < ps.length; i++) {
+        if (String(ps[i].id) === pid) { p = ps[i]; break; }
+      }
+      var evals = evaluateEntryCues(p, groups[pid], duration);
+      groups[pid].forEach(function (cue, k) {
+        resultById[cue.id] = evals[k];
+      });
+    });
+
+    return {
+      cues: cues,
+      results: cues.map(function (c) { return resultById[c.id]; })
+    };
+  }
+
   // ---------- 方案快照：两场景对比 ----------
 
   var DIFF_EPS = 1e-6;   // 区间端点"时间变化"判定容差（秒）
@@ -989,6 +1209,8 @@
    *  - 丁起初与丙分离，约 t=2.6 起追上丙并保持贴近 -> 持续碰撞（相对静止退化段）
    *  - 中央禁入矩形覆盖十字交点：甲、乙按实时安全半径先后进入（演示禁入区分析），
    *    丙、丁错峰折线从对角掠过，不侵入
+   *  - 入场口令 5 项：甲 3 项（前两项按时窗依次触发，第三项进入过早->错过，
+   *    其后一项前序未完成），乙 1 项（t=0 起点已在入口内按 0s 触发）。
    */
   function builtinScene() {
     return {
@@ -996,6 +1218,18 @@
       world: { width: 1000, height: 600 },
       obstacles: [
         { id: 'o1', name: '中央禁入区', x: 440, y: 240, width: 120, height: 120 }
+      ],
+      entryCues: [
+        // 甲 y=300 横贯（x=60+73.33t）：x=97 处 t≈0.50，[0,2] 内触发
+        { id: 'e1', performerId: 'p1', name: '甲·左侧口', x: 97, y: 260, width: 50, height: 80, from: 0, to: 2 },
+        // 甲 x=240 处 t≈2.45，[2,4] 内触发
+        { id: 'e2', performerId: 'p1', name: '甲·二道口', x: 240, y: 260, width: 60, height: 80, from: 2, to: 4 },
+        // 甲 x=365 处 t≈4.16，早于时窗 [5,7] -> 错过时窗
+        { id: 'e3', performerId: 'p1', name: '甲·错窗口', x: 365, y: 260, width: 50, height: 80, from: 5, to: 7 },
+        // 甲 x=660 处 t≈8.18，时窗允许，但前序未完成 -> 不触发
+        { id: 'e4', performerId: 'p1', name: '甲·后续口', x: 660, y: 260, width: 80, height: 80, from: 0, to: 12 },
+        // 乙起点 (500,40) 已在 (470,530)×(10,80) 严格内部 -> 按 t=0 触发
+        { id: 'e5', performerId: 'p2', name: '乙·顶场口', x: 470, y: 10, width: 60, height: 70, from: 0, to: 3 }
       ],
       performers: [
         {
@@ -1058,6 +1292,10 @@
     normalizeObstacles: normalizeObstacles,
     analyzeObstacle: analyzeObstacle,
     isPerformerInObstacle: isPerformerInObstacle,
+    normalizeEntryCues: normalizeEntryCues,
+    rectCenterEntryTimes: rectCenterEntryTimes,
+    evaluateEntryCues: evaluateEntryCues,
+    analyzeEntryCues: analyzeEntryCues,
     compareScenes: compareScenes,
     builtinScene: builtinScene
   };

@@ -531,6 +531,170 @@ input:focus { outline: none; border-color: var(--accent); }
 .diff-perf-only { font-size: 11px; color: var(--text-dim); }
 .diff-note { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
 
+/* ---------- 入场口令面板 ---------- */
+.panel-cues .cue-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 12px 2px;
+  flex-wrap: wrap;
+}
+.cue-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--bg-panel-2);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.cue-tab:hover { color: var(--text); border-color: #3a4654; }
+.cue-tab.active {
+  color: var(--text);
+  border-color: rgba(63, 185, 80, .6);
+  background: rgba(63, 185, 80, .12);
+}
+
+.cue-list { max-height: 340px; overflow-y: auto; padding: 4px 8px 6px; }
+.cue-empty { padding: 8px 8px 10px; font-size: 12px; color: var(--text-dim); }
+
+.cue-row {
+  display: grid;
+  grid-template-columns: 26px 1fr;
+  gap: 6px;
+  padding: 7px 8px;
+  margin: 4px 0;
+  border-radius: 8px;
+  background: var(--bg-panel-2);
+  border-left: 3px solid var(--border);
+  font-variant-numeric: tabular-nums;
+}
+.cue-row.triggered { border-left-color: var(--ok); }
+.cue-row.missed { border-left-color: var(--danger); }
+.cue-row.blocked { border-left-color: var(--text-dim); }
+
+.cue-order {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding-top: 2px;
+}
+.cue-move {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 8px;
+  line-height: 1;
+  padding: 1px 3px;
+  border-radius: 3px;
+}
+.cue-move:hover:not(:disabled) { color: var(--accent); background: rgba(88,166,255,.12); }
+.cue-move:disabled { opacity: .25; cursor: default; }
+.cue-num {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.cue-main { min-width: 0; }
+.cue-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.cue-line + .cue-line { margin-top: 5px; }
+.cue-name-input {
+  flex: 1;
+  min-width: 90px;
+  width: 100%;
+  font-size: 12px;
+}
+.cue-rect-edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.cue-num-input {
+  width: 52px;
+  padding: 2px 5px;
+  font-size: 12px;
+}
+.cue-field-x, .cue-field-y { width: 52px; }
+.cue-line-time { font-size: 11px; color: var(--text-dim); }
+.cue-line-time .cue-num-input { width: 50px; }
+.cue-del {
+  background: transparent; border: 1px solid var(--border);
+  color: var(--text-dim); cursor: pointer; font-size: 11px;
+  padding: 2px 7px; border-radius: 5px;
+}
+.cue-del:hover { color: var(--danger); border-color: var(--danger); }
+
+.cue-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  margin-left: 2px;
+}
+.cue-status b { color: var(--ok); font-weight: 600; }
+.cue-row.missed .cue-status b,
+.cue-row.missed .cue-state-text { color: var(--danger); }
+.cue-row.blocked .cue-state-text { color: var(--text-dim); }
+.cue-reason { color: var(--text-dim); }
+.cue-allentries {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.cue-entry {
+  display: inline-block;
+  font-size: 10px;
+  border-radius: 4px;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.cue-entry.inwin { color: #7ee787; border-color: rgba(63,185,80,.45); background: rgba(63,185,80,.1); }
+.cue-entry.cue-hit {
+  color: #04130a;
+  background: var(--ok);
+  border-color: var(--ok);
+  font-weight: 700;
+  text-decoration: none;
+}
+.cue-entry.cue-hit:hover { color: #04130a; }
+.cue-entry.outwin { opacity: .6; }
+
+.cue-foot {
+  padding: 6px 14px 10px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  border-top: 1px solid var(--border);
+}
+
+/* 时间轴入场口令触发标记（绿色菱形） */
+.tl-cue {
+  position: absolute;
+  top: 3px;
+  width: 12px;
+  height: 12px;
+  background: var(--ok);
+  transform: translateX(-50%) rotate(45deg);
+  z-index: 3;
+  cursor: pointer;
+  border: 1px solid #0d1117;
+}
+
 @media (max-width: 1080px) {
   .layout { grid-template-columns: 1fr; }
 }
